@@ -85,6 +85,89 @@ read-only RBAC. The optional [writer RBAC](examples/writer-rbac.yaml) and
 `--dry-run=false` are both required to enable writes. These examples are generic;
 none have been deployed by this project bootstrap.
 
+## Install the controller
+
+The controller currently ships example Kubernetes manifests, not a Helm chart.
+The initial implementation is on `feat/controller-bootstrap`; `main` does not
+contain the controller yet. Start from that branch while it is under development:
+
+```sh
+git clone --branch feat/controller-bootstrap https://github.com/colaH16/ingress-gateway-bridge.git
+cd ingress-gateway-bridge
+```
+
+Prerequisites:
+
+- Gateway API CRDs and a working Cilium or Cloudflare Gateway implementation.
+- An existing Gateway with listeners that allow HTTPRoutes from the application's
+  namespace and match its hostnames. The bridge does not install either component.
+- Existing application Services and permission to install the example RBAC.
+- A published controller image your nodes can pull. Use a tested image digest
+  when enabling writes; a successful build is not a data-plane validation.
+
+First edit `examples/controller/bridge.yaml`: each class maps to an existing
+Gateway's name, namespace, and optional listener `sectionName`. Keep the class
+names in `examples/controller/ingressclasses.yaml` consistent. If an Ingress has
+`spec.tls`, select `tlsPolicy: External` only after the Gateway or tunnel edge's
+TLS is configured. Ingress TLS does not configure a Gateway certificate.
+
+Install the read-only preview (the example defaults to `--dry-run=true`):
+
+```sh
+kubectl kustomize examples/controller
+kubectl apply -k examples/controller
+kubectl rollout status deployment/ingress-gateway-bridge -n ingress-gateway-bridge
+kubectl logs deployment/ingress-gateway-bridge -n ingress-gateway-bridge
+```
+
+Review the rendered resources before applying them. A source Ingress selecting a
+mapped class is required to see a planned conversion. In dry-run mode no
+HTTPRoute is created, updated, or deleted.
+
+To enable HTTPRoute creation:
+
+1. Grant writer permissions. `examples/writer-rbac.yaml` is a cluster-wide
+   example; installations scoped to specific application namespaces should use
+   namespace Roles/RoleBindings for its HTTPRoute and Event rules instead.
+2. In `examples/controller/deployment.yaml`, change `--dry-run=true` to
+   `--dry-run=false`, pin the tested image digest, and set
+   `spec.strategy.type: Recreate` for the single writer replica. Multiple writers
+   require leader election and its Lease permissions.
+3. Apply the RBAC and the controller manifests, then wait for readiness:
+
+```sh
+# If the cluster-wide example writer scope is appropriate for your installation:
+kubectl apply -f examples/writer-rbac.yaml
+kubectl apply -k examples/controller
+kubectl rollout status deployment/ingress-gateway-bridge -n ingress-gateway-bridge
+```
+
+Adapt `examples/ingress.yaml` to your Services, application namespace, hostnames,
+and mapped class, then apply it. Ensure the Gateway's `allowedRoutes` permits that
+namespace. For an existing manually managed HTTPRoute, withdraw that manifest and
+confirm its removal before switching the source Ingress; the bridge will not
+adopt a Route owned by another manager.
+
+```sh
+kubectl apply -f examples/ingress.yaml
+kubectl get httproute -n demo-apps
+kubectl describe httproute -n demo-apps
+kubectl get events -n demo-apps --field-selector involvedObject.kind=Ingress
+```
+
+Check that generated Routes have an ownerReference to the source Ingress and
+`Accepted=True` / `ResolvedRefs=True` from the target implementation, then test
+HTTP requests through the actual Gateway. Do not apply or commit generated
+HTTPRoutes as application input. Binding changes require a controller restart;
+the example ConfigMap generator changes the Deployment's ConfigMap reference
+when you reapply the kustomization.
+
+To withdraw an application, delete or change its source Ingress first and verify
+its bridge-owned Routes disappear. Uninstalling only the controller does not
+remove existing Routes. Remove its manifests and writer RBAC after applications
+are withdrawn. Keep your Gateway implementation, Gateways, Services, DNS, and
+certificates under their existing management.
+
 ## Resource lifecycle and rejection
 
 Generated HTTPRoutes have a controller ownerReference to the source Ingress UID.

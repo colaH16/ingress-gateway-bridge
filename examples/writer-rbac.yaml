@@ -1,0 +1,50 @@
+# Optional. The default example is read-only and dry-run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ingress-gateway-bridge-writer
+rules:
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [create, update, delete]
+  - apiGroups: ['']
+    resources: [events]
+    verbs: [create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ingress-gateway-bridge-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ingress-gateway-bridge-writer
+subjects:
+  - kind: ServiceAccount
+    name: ingress-gateway-bridge
+    namespace: ingress-gateway-bridge
+---
+# Required only if --leader-elect=true is enabled for multiple writer replicas.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ingress-gateway-bridge-leader-election
+  namespace: ingress-gateway-bridge
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ingress-gateway-bridge-leader-election
+  namespace: ingress-gateway-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingress-gateway-bridge-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: ingress-gateway-bridge
+    namespace: ingress-gateway-bridge

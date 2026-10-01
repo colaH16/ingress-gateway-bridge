@@ -1,0 +1,20 @@
+controllerName: ingress-gateway-bridge.colah16.github.io/controller
+classes:
+  public-apps:
+    parentRefs:
+      - name: public
+        namespace: gateway-system
+        sectionName: http
+  tunnel-home:
+    parentRefs:
+      - name: home
+        namespace: cloudflare-home
+        sectionName: http
+  tunnel-oci:
+    parentRefs:
+      - name: oci
+        namespace: cloudflare-oci
+        sectionName: http
+# TLS defaults to Reject. Set a binding's tlsPolicy: External only after its
+# external TLS/certificates have been configured and reviewed.
+ignoredAnnotations: []

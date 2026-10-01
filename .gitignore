@@ -1,0 +1,6 @@
+/bin/
+/.envtest/
+/coverage.out
+/bridge.local.yaml
+/kubeconfig*
+/.env

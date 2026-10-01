@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: public-apps
+spec:
+  controller: ingress-gateway-bridge.colah16.github.io/controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: tunnel-home
+spec:
+  controller: ingress-gateway-bridge.colah16.github.io/controller
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: tunnel-oci
+spec:
+  controller: ingress-gateway-bridge.colah16.github.io/controller

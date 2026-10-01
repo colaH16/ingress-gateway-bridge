@@ -75,6 +75,11 @@ func TestAPIServerReconciliation(t *testing.T) {
 	}
 	ingress := source()
 	ingress.UID = ""
+	ingress.Annotations = map[string]string{
+		"traefik.ingress.kubernetes.io/router.middlewares": "legacy-auth",
+		"nginx.ingress.kubernetes.io/rewrite-target":       "/legacy",
+		"objectset.rio.cattle.io/id":                       "management-metadata",
+	}
 	objects := []client.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps"}},
 		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "public-apps"}, Spec: networkingv1.IngressClassSpec{Controller: r.Config.ControllerName}},

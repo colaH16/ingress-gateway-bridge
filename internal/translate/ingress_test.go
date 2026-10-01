@@ -4,6 +4,7 @@ package translate
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -106,11 +107,8 @@ func TestUnsupportedInputRejected(t *testing.T) {
 		name   string
 		change func(*networkingv1.Ingress)
 	}{
-		{"middleware", func(i *networkingv1.Ingress) {
-			i.Annotations = map[string]string{"traefik.ingress.kubernetes.io/router.middlewares": "private-auth"}
-		}},
-		{"unknown annotation", func(i *networkingv1.Ingress) {
-			i.Annotations = map[string]string{"example.com/custom": "private-value"}
+		{"unknown bridge annotation", func(i *networkingv1.Ingress) {
+			i.Annotations = map[string]string{AnnotationPrefix + "unknown": "private-value"}
 		}},
 		{"implementation specific", func(i *networkingv1.Ingress) {
 			i.Spec.Rules[0].HTTP.Paths[0].PathType = ptr.To(networkingv1.PathTypeImplementationSpecific)
@@ -175,18 +173,64 @@ func TestNamedPortUsesServicePortNotTargetPort(t *testing.T) {
 	}
 }
 
-func TestExplicitTLSAndAnnotationAcknowledgement(t *testing.T) {
+func TestExplicitTLSWithForeignCertificateAnnotations(t *testing.T) {
 	ingress := fixture()
 	ingress.Spec.TLS = []networkingv1.IngressTLS{{SecretName: "not-copied"}}
 	ingress.Annotations = map[string]string{"cert-manager.io/cluster-issuer": "issuer"}
 	b := binding()
 	b.TLSPolicy = "External"
-	routes, err := Convert(ingress, b, nil, config.Config{ControllerName: config.ControllerName, IgnoredAnnotations: []string{"cert-manager.io/cluster-issuer"}})
+	routes, err := Convert(ingress, b, nil, config.Config{ControllerName: config.ControllerName})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(routes) != 1 || len(routes[0].Annotations) != 2 {
 		t.Fatal("source annotation was copied")
+	}
+}
+
+func TestForeignAnnotationsDoNotChangeOrBlockTranslation(t *testing.T) {
+	for _, key := range []string{
+		"traefik.ingress.kubernetes.io/router.middlewares",
+		"nginx.ingress.kubernetes.io/rewrite-target",
+		"haproxy.org/path-rewrite",
+		"haproxy-ingress.github.io/config-backend",
+		"cloudflare-tunnel-ingress-controller.strrl.dev/disable-chunked-encoding",
+		"objectset.rio.cattle.io/id",
+		"cert-manager.io/cluster-issuer",
+		"example.com/custom",
+		// Similar-looking foreign namespaces must not be claimed by the bridge.
+		"other." + AnnotationPrefix + "unknown",
+	} {
+		t.Run(key, func(t *testing.T) {
+			ingress := fixture()
+			baseline, err := convert(ingress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Deliberately invalid provider syntax must remain opaque to the bridge.
+			value := "[invalid provider syntax(\nnot: valid: yaml"
+			ingress.Annotations = map[string]string{key: value}
+			routes, err := convert(ingress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(routes, baseline) {
+				t.Fatal("foreign annotation changed generated routes")
+			}
+			if ingress.Annotations[key] != value {
+				t.Fatal("source annotation was modified")
+			}
+		})
+	}
+}
+
+func TestBridgeAnnotationErrorsAreDeterministicAndRedacted(t *testing.T) {
+	ingress := fixture()
+	ingress.Annotations = map[string]string{AnnotationPrefix + "z": "private-z", AnnotationPrefix + "a": "private-a"}
+	_, err := convert(ingress)
+	want := "unknown bridge Ingress annotations: " + AnnotationPrefix + "a, " + AnnotationPrefix + "z"
+	if err == nil || err.Error() != want {
+		t.Fatalf("unexpected annotation error: %v", err)
 	}
 }
 

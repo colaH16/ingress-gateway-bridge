@@ -194,17 +194,17 @@ func TestIngressClassOwnershipChangeWithdrawsRoutes(t *testing.T) {
 	}
 }
 
-func TestUnsupportedAnnotationWithdrawsOnlyOwnedRoutes(t *testing.T) {
+func TestUnknownBridgeAnnotationWithdrawsOnlyOwnedRoutes(t *testing.T) {
 	r, c := setup(t, &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "manual-route", Namespace: "apps"}})
 	r.Recorder = record.NewFakeRecorder(10)
 	reconcileSource(t, r)
 	changeSource(t, c.Client, func(i *networkingv1.Ingress) {
-		i.Annotations = map[string]string{"traefik.ingress.kubernetes.io/router.middlewares": "auth"}
+		i.Annotations = map[string]string{translate.AnnotationPrefix + "unknown": "opaque-value"}
 	})
 	reconcileSource(t, r)
 	routes := listRoutes(t, c)
 	if len(routes) != 1 || routes[0].Name != "manual-route" {
-		t.Fatal("unsupported authentication was silently dropped")
+		t.Fatal("unknown bridge annotation did not withdraw only bridge-owned routes")
 	}
 	select {
 	case <-r.Recorder.(*record.FakeRecorder).Events:
@@ -221,7 +221,9 @@ func TestDryRunNeverWritesEvenForCleanup(t *testing.T) {
 	r.Recorder = record.NewFakeRecorder(10)
 	changeSource(t, c.Client, func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/changed" })
 	reconcileSource(t, r)
-	changeSource(t, c.Client, func(i *networkingv1.Ingress) { i.Annotations = map[string]string{"example.com/auth": "value"} })
+	changeSource(t, c.Client, func(i *networkingv1.Ingress) {
+		i.Annotations = map[string]string{translate.AnnotationPrefix + "unknown": "value"}
+	})
 	reconcileSource(t, r)
 	if c.creates+c.updates+c.deletes != 0 || len(listRoutes(t, c)) != 1 {
 		t.Fatal("dry-run wrote to API")
@@ -236,6 +238,63 @@ func TestDryRunNeverWritesEvenForCleanup(t *testing.T) {
 	reconcileSource(t, r2)
 	if c2.creates+c2.updates+c2.deletes != 0 || len(listRoutes(t, c2)) != 0 {
 		t.Fatal("dry-run created a route")
+	}
+}
+
+func TestForeignAnnotationsPreserveExistingRoutesAndSource(t *testing.T) {
+	r, c := setup(t)
+	reconcileSource(t, r)
+	before := listRoutes(t, c)
+	annotations := map[string]string{
+		"traefik.ingress.kubernetes.io/router.middlewares": "legacy-auth",
+		"nginx.ingress.kubernetes.io/rewrite-target":       "/",
+		"objectset.rio.cattle.io/id":                       "management-metadata",
+	}
+	changeSource(t, c.Client, func(i *networkingv1.Ingress) { i.Annotations = annotations })
+	reconcileSource(t, r)
+	if c.updates != 0 || c.deletes != 0 || !reflect.DeepEqual(listRoutes(t, c), before) {
+		t.Fatal("foreign annotations changed or withdrew an existing route")
+	}
+	var ingress networkingv1.Ingress
+	if err := c.Get(context.Background(), sourceKey, &ingress); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ingress.Annotations, annotations) {
+		t.Fatal("source annotations changed")
+	}
+}
+
+func TestOnlyExplicitBridgeClassesAreProcessed(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		bind        bool
+		sourceClass *string
+	}{
+		{"unmapped foreign class", false, ptr.To("traefik")},
+		{"mapped but owned by another controller", true, ptr.To("traefik")},
+		{"classless", false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, c := setup(t, &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: networkingv1.IngressClassSpec{Controller: "example.com/another-controller"}})
+			if tc.bind {
+				r.Config.Classes["traefik"] = r.Config.Classes["public-apps"]
+			}
+			changeSource(t, c.Client, func(i *networkingv1.Ingress) {
+				i.Spec.IngressClassName = tc.sourceClass
+				// Even malformed bridge input is irrelevant on a class we do not own.
+				i.Annotations = map[string]string{translate.AnnotationPrefix + "unknown": "opaque-value"}
+			})
+			r.Recorder = record.NewFakeRecorder(10)
+			reconcileSource(t, r)
+			if c.creates+c.updates+c.deletes != 0 || len(listRoutes(t, c)) != 0 {
+				t.Fatal("processed a class outside the bridge's explicit ownership")
+			}
+			select {
+			case <-r.Recorder.(*record.FakeRecorder).Events:
+				t.Fatal("validated annotations on an unselected Ingress")
+			default:
+			}
+		})
 	}
 }
 

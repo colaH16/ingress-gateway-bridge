@@ -1,15 +1,19 @@
 # Testing boundaries
 
 `make test` covers host isolation, Exact/Prefix literal semantics, named Service
-ports, class selection, unsupported features, ownership collisions, idempotence,
+ports, explicit class ownership, unsupported standard fields, ownership collisions, idempotence,
 source preservation, stale route cleanup, dry-run writes, listener namespace/kind
 permissions, and dependency event mapping. It runs the Go race detector and vet.
+It also checks that malformed NGINX/Traefik/HAProxy annotations neither block nor
+change conversion, original annotations remain intact, and unknown bridge-specific
+keys are rejected with deterministic errors that do not expose their values.
 
 `make test-integration` downloads the official controller-runtime envtest tools,
 starts a **local** Kubernetes 1.35.0 API server and etcd, installs Gateway API 1.5.1
 CRDs from the pinned Go module, and runs the manager with real informers. It checks:
 
 - HTTPRoute schema admission and owner references using the real Ingress UID.
+- Foreign controller/management annotations do not block route creation.
 - API defaulting does not cause a repeated update loop.
 - An Ingress update reaches the route without an explicit Reconcile invocation.
 - A named Service port update reaches the route through the Service watch.

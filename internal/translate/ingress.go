@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	ControllerAnnotation = "ingress-gateway-bridge.colah16.github.io/controller"
-	SourceAnnotation     = "ingress-gateway-bridge.colah16.github.io/source"
+	AnnotationPrefix     = "ingress-gateway-bridge.colah16.github.io/"
+	ControllerAnnotation = AnnotationPrefix + "controller"
+	SourceAnnotation     = AnnotationPrefix + "source"
 	LegacyClass          = "kubernetes.io/ingress.class"
 )
 
@@ -53,7 +54,7 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 	if ingress.UID == "" {
 		return nil, reject("source Ingress must have a UID")
 	}
-	if err := checkAnnotations(ingress.Annotations, cfg.IgnoredAnnotations); err != nil {
+	if err := checkAnnotations(ingress.Annotations); err != nil {
 		return nil, err
 	}
 	if len(ingress.Spec.TLS) != 0 && binding.TLSPolicy != "External" {
@@ -164,7 +165,7 @@ func pathMatch(path networkingv1.HTTPIngressPath) (gatewayv1.HTTPPathMatch, erro
 	case networkingv1.PathTypePrefix:
 		kind = gatewayv1.PathMatchPathPrefix
 	default:
-		return gatewayv1.HTTPPathMatch{}, reject("ImplementationSpecific paths need an explicit provider adapter and are not supported yet")
+		return gatewayv1.HTTPPathMatch{}, reject("ImplementationSpecific paths are not supported yet; use Prefix or Exact")
 	}
 	if !strings.HasPrefix(path.Path, "/") || strings.Contains(path.Path, "//") ||
 		strings.Contains(path.Path, "%2f") || strings.Contains(path.Path, "%2F") ||
@@ -235,26 +236,20 @@ func backendRef(namespace string, backend networkingv1.IngressBackend,
 	}}, nil
 }
 
-func checkAnnotations(annotations map[string]string, ignored []string) error {
-	allowed := map[string]bool{
-		LegacyClass: true,
-		"kubectl.kubernetes.io/last-applied-configuration": true,
-		"meta.helm.sh/release-name":                        true, "meta.helm.sh/release-namespace": true,
-		"field.cattle.io/publicEndpoints": true,
-	}
-	for _, name := range ignored {
-		allowed[name] = true
-	}
-	var unsupported []string
+// Only the bridge's annotation namespace belongs to its input contract. Other
+// controllers' annotations stay on the Ingress and are not interpreted or copied.
+// No bridge-specific Ingress input annotations are defined in this version.
+func checkAnnotations(annotations map[string]string) error {
+	var unknown []string
 	for name := range annotations {
-		if !allowed[name] {
-			unsupported = append(unsupported, name)
+		if strings.HasPrefix(name, AnnotationPrefix) {
+			unknown = append(unknown, name)
 		}
 	}
-	sort.Strings(unsupported)
-	if len(unsupported) != 0 {
+	sort.Strings(unknown)
+	if len(unknown) != 0 {
 		// Never include annotation values: they may contain credentials or URLs.
-		return reject("unsupported annotations: %s", strings.Join(unsupported, ", "))
+		return reject("unknown bridge Ingress annotations: %s", strings.Join(unknown, ", "))
 	}
 	return nil
 }

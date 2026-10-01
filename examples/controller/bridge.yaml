@@ -17,4 +17,3 @@ classes:
         sectionName: http
 # TLS defaults to Reject. Set a binding's tlsPolicy: External only after its
 # external TLS/certificates have been configured and reviewed.
-ignoredAnnotations: []

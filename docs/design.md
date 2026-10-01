@@ -7,6 +7,14 @@ Ingress objects. Infrastructure operators own IngressClasses, binding configurat
 Gateways/GatewayClasses, listener permissions, certificates, backend TLS policies,
 DNS, and Cloudflare tunnels.
 
+The bridge handles only classes present in its explicit binding configuration and
+owned by its IngressClass controller name. It does not convert every class. Foreign
+NGINX/Traefik/HAProxy annotations, including malformed values, remain on the source
+and are neither interpreted nor copied to the generated Route. Only annotations
+in `ingress-gateway-bridge.colah16.github.io/` belong to the bridge's validation
+contract. No bridge-specific Ingress input keys are defined yet; unknown keys are
+rejected. Future known keys must reject invalid syntax and values.
+
 One installation handles multiple classes through a single configuration file.
 If several writer replicas are used, enable leader election and grant Lease
 permissions. All replicas in an installation must use the same configuration.
@@ -57,7 +65,8 @@ Gateway defaulted fields are explicitly emitted to avoid continuous API updates.
 Deletes use UID and resourceVersion preconditions. Writes across several HTTPRoutes
 are **not atomic**; a later API error can leave an intermediate state until retry.
 
-Unsupported source features withdraw bridge-owned routes and report a rejection.
+Invalid bridge annotations and unsupported standard source fields withdraw
+bridge-owned routes and report a rejection.
 Transient read or named-port resolution failures leave the last route in place.
 Gateways/listener permissions are checked before writes, but the destination
 controller decides hostname intersections, certificates, and final Route acceptance.
@@ -76,8 +85,9 @@ was inspected at v1.0.0. It is a batch migration tool that groups Ingresses, gen
 Gateways, and translates provider annotations. Its common converter is not a
 drop-in reconciliation engine for individually owned routes bound to pre-existing
 Gateways. The initial bridge uses a small purpose-built standard-field converter,
-without copying upstream implementation code. Reuse can be revisited for explicit
-provider adapters; it must not change route ownership or hide unsupported features.
+without copying upstream implementation code. Translating the existing annotation
+languages of Traefik, NGINX, HAProxy, or other controllers is outside this project's
+scope; new optional features will use the bridge's own input contract.
 
 References:
 

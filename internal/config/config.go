@@ -15,9 +15,8 @@ import (
 const ControllerName = "ingress-gateway-bridge.colah16.github.io/controller"
 
 type Config struct {
-	ControllerName     string             `json:"controllerName"`
-	Classes            map[string]Binding `json:"classes"`
-	IgnoredAnnotations []string           `json:"ignoredAnnotations,omitempty"`
+	ControllerName string             `json:"controllerName"`
+	Classes        map[string]Binding `json:"classes"`
 }
 
 type Binding struct {
@@ -76,11 +75,6 @@ func (c Config) Validate() error {
 				return fmt.Errorf("class %s: duplicate Gateway parent reference", name)
 			}
 			seen[p] = true
-		}
-	}
-	for _, annotation := range c.IgnoredAnnotations {
-		if len(validation.IsQualifiedName(annotation)) != 0 {
-			return fmt.Errorf("invalid ignored annotation name %q", annotation)
 		}
 	}
 	return nil

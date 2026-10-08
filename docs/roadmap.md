@@ -16,8 +16,9 @@
    the cutover is verified. TCP/UDP/gRPC require separately specified behavior.
 
 Middleware CRD readers and translations of Traefik, NGINX, HAProxy, or other
-controllers' annotations are outside the current scope. A bridge-specific annotation
-API is deferred; if added later, only its documented keys and values will be validated.
+controllers' annotations are outside the current scope. Optional bridge-owned redirect and header annotations are implemented; only their
+documented keys and values are accepted. Additional annotation features require
+explicitly specified semantics and tests.
 
 Public examples remain generic. Infrastructure credentials, actual domains, tunnel
 IDs, and production GitOps manifests belong in the separate operating repository.

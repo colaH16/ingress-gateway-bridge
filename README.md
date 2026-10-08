@@ -19,8 +19,8 @@ HTTPRoute in the application's namespace
 **Status: initial development version.** The bridge handles explicitly selected
 IngressClasses and standard routing fields. It is not a universal converter for
 existing Ingress controllers. Current development focuses on Ingress `spec` routing
-and live data-plane validation. Middleware support and a bridge-specific input
-annotation API are deferred. No upstream controller patches are required.
+and live data-plane validation. Middleware support is deferred. Optional bridge-owned annotations preserve
+HTTP-to-HTTPS redirects and request/response headers. No upstream controller patches are required.
 
 ## Supported subset
 
@@ -46,10 +46,64 @@ The binding selects a **Gateway object**, not a GatewayClass or a tunnel by host
 Unmapped classes and classes owned by another controller are not converted.
 
 `tlsPolicy: External` means the operator has already configured TLS on the Gateway
-or tunnel edge. The bridge does not copy Secrets, issue certificates, redirect HTTP,
+or tunnel edge. The bridge does not copy Secrets, issue certificates,
 create Gateways/GatewayClasses, or change DNS/tunnels. A backend port of `443` does
 not imply backend HTTPS; configure the target implementation's backend TLS support
 (for example, a supported BackendTLSPolicy) separately.
+
+## Optional redirect and header annotations
+
+All keys use the `ingress-gateway-bridge.colah16.github.io/` prefix:
+
+| Key | Value and behavior |
+| --- | --- |
+| `https-redirect` | Literal `"true"` or `"false"`; default false |
+| `https-redirect-status-code` | `"301"` or `"302"`; default 302; requires redirect enabled |
+| `request-headers` | JSON object with Gateway API header filter `set`, `add`, and/or `remove` |
+| `response-headers` | Same JSON format, applied to responses |
+
+Header filters apply to every forwarding rule in that Ingress. Split Ingresses if
+paths need different headers. Header names are case-insensitive; duplicate names
+across operations, unknown/duplicate JSON fields, empty filters, invalid header
+syntax, and values exceeding Gateway API limits are rejected. Errors report keys,
+never annotation values. Malformed bridge options withdraw only that source's
+bridge-owned Routes. Foreign controller annotations remain opaque.
+
+HTTPS redirects require `spec.tls`, `tlsPolicy: External`, and separately configured
+HTTP listener references. They create an additional owned HTTPRoute per host,
+matching `/`, preserving host, path, and query while redirecting to HTTPS port 443.
+The bridge validates HTTP port 80 redirect listeners and HTTPS port 443 forwarding
+listeners before writes. No redirect is added unless the Ingress opts in:
+
+```yaml
+# Class binding (operator configuration)
+classes:
+  public-apps:
+    tlsPolicy: External
+    parentRefs:
+    - name: public
+      namespace: gateway-system
+      sectionName: https
+    httpRedirectParentRefs:
+    - name: public
+      namespace: gateway-system
+      sectionName: http
+```
+
+```yaml
+# Ingress metadata; spec.tls references an existing certificate.
+annotations:
+  ingress-gateway-bridge.colah16.github.io/https-redirect: "true"
+  ingress-gateway-bridge.colah16.github.io/request-headers: >-
+    {"set":[{"name":"X-Forwarded-Proto","value":"https"}]}
+  ingress-gateway-bridge.colah16.github.io/response-headers: >-
+    {"set":[{"name":"X-Content-Type-Options","value":"nosniff"}],"remove":["Server"]}
+```
+
+The target Gateway implementation must support the selected filters. The bridge
+does not configure Gateway certificates, copy Secrets, or infer TLS from a backend
+port. A Gateway proxy may add its own `Server` header after filtering the upstream
+response; verify the observable response with your implementation.
 
 ## Build and test
 
@@ -186,10 +240,9 @@ the last applied route and are retried. Missing numeric-port backends are repres
 as backendRefs; the Gateway controller reports `ResolvedRefs=False` when invalid.
 
 The bridge owns only the Ingress annotation namespace
-`ingress-gateway-bridge.colah16.github.io/`. No Ingress input keys are defined in
-that namespace yet, so unknown keys are rejected. The `controller` and `source`
+`ingress-gateway-bridge.colah16.github.io/`. Only the documented input keys below are accepted; unknown keys are rejected. The `controller` and `source`
 keys placed on generated HTTPRoutes are output metadata, not Ingress input options.
-Future bridge input annotations must validate their own syntax and values.
+Known input annotations validate their syntax and values.
 
 NGINX, Traefik, HAProxy, cert-manager, Fleet, and other foreign annotations are
 opaque to the bridge. They do not block conversion and are not copied to HTTPRoute.
@@ -197,7 +250,7 @@ The standard `kubernetes.io/ingress.class` annotation remains a class selector.
 There is no annotation allowlist or `ignoredAnnotations` configuration. Changing
 an Ingress to a bridge-owned class does not carry forward foreign authentication,
 rewrite, or origin behavior; configure required behavior through the target Gateway
-or future bridge-specific features before explicitly opting in.
+or the documented bridge options before explicitly opting in.
 
 Read [the design](docs/design.md), [test boundaries](docs/testing.md), and
 [roadmap](docs/roadmap.md) before a live migration.

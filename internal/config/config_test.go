@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+func TestRedirectParents(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		parents []Parent
+		valid   bool
+	}{
+		{"explicit HTTP listener", []Parent{{Name: "public", Namespace: "gateway-system", SectionName: "http"}}, true},
+		{"missing section", []Parent{{Name: "public", Namespace: "gateway-system"}}, false},
+		{"implicit namespace", []Parent{{Name: "public", SectionName: "http"}}, false},
+		{"overlaps forwarding", []Parent{{Name: "public", Namespace: "gateway-system", SectionName: "https"}}, false},
+		{"duplicate redirect", []Parent{{Name: "public", Namespace: "gateway-system", SectionName: "http"}, {Name: "public", Namespace: "gateway-system", SectionName: "http"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := Binding{TLSPolicy: "External", ParentRefs: []Parent{{Name: "public", Namespace: "gateway-system", SectionName: "https"}}, HTTPRedirectParentRefs: tc.parents}
+			cfg := Config{ControllerName: ControllerName, Classes: map[string]Binding{"public-apps": b}}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
 func TestLoad(t *testing.T) {
 	for _, tc := range []struct {
 		name, content string

@@ -21,6 +21,8 @@ type Config struct {
 
 type Binding struct {
 	ParentRefs []Parent `json:"parentRefs"`
+	// Optional HTTP listeners used only by an opt-in HTTPS redirect route.
+	HTTPRedirectParentRefs []Parent `json:"httpRedirectParentRefs,omitempty"`
 	// External explicitly delegates TLS to the existing Gateway or tunnel edge.
 	// It does not copy Ingress TLS secrets or configure certificates.
 	TLSPolicy string `json:"tlsPolicy,omitempty"`
@@ -65,7 +67,10 @@ func (c Config) Validate() error {
 			return fmt.Errorf("class %s: tlsPolicy must be Reject or External", name)
 		}
 		seen := map[Parent]bool{}
-		for _, p := range binding.ParentRefs {
+		if len(binding.HTTPRedirectParentRefs) > 16 {
+			return fmt.Errorf("class %s must have at most 16 httpRedirectParentRefs", name)
+		}
+		for _, p := range binding.AllParents() {
 			if len(validation.IsDNS1123Subdomain(p.Name)) != 0 || len(p.Name) > 253 ||
 				len(validation.IsDNS1123Label(p.Namespace)) != 0 ||
 				(p.SectionName != "" && (len(validation.IsDNS1123Label(p.SectionName)) != 0)) {
@@ -76,13 +81,30 @@ func (c Config) Validate() error {
 			}
 			seen[p] = true
 		}
+		for _, p := range binding.HTTPRedirectParentRefs {
+			if p.SectionName == "" {
+				return fmt.Errorf("class %s: httpRedirectParentRefs require an explicit sectionName", name)
+			}
+		}
 	}
 	return nil
 }
 
 func (b Binding) References() []gatewayv1.ParentReference {
-	refs := make([]gatewayv1.ParentReference, 0, len(b.ParentRefs))
-	for _, parent := range b.ParentRefs {
+	return references(b.ParentRefs)
+}
+
+func (b Binding) AllParents() []Parent {
+	return append(append([]Parent(nil), b.ParentRefs...), b.HTTPRedirectParentRefs...)
+}
+
+func (b Binding) RedirectReferences() []gatewayv1.ParentReference {
+	return references(b.HTTPRedirectParentRefs)
+}
+
+func references(parents []Parent) []gatewayv1.ParentReference {
+	refs := make([]gatewayv1.ParentReference, 0, len(parents))
+	for _, parent := range parents {
 		namespace := gatewayv1.Namespace(parent.Namespace)
 		group, kind := gatewayv1.Group(gatewayv1.GroupName), gatewayv1.Kind("Gateway")
 		ref := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(parent.Name), Namespace: &namespace, Group: &group, Kind: &kind}

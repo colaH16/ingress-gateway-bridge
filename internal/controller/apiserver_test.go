@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colaH16/ingress-gateway-bridge/internal/config"
+	"github.com/colaH16/ingress-gateway-bridge/internal/translate"
+
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,6 +55,10 @@ func TestAPIServerReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &IngressReconciler{Client: manager.GetClient(), Config: testConfig()}
+	r.Config.Classes["redirect-apps"] = config.Binding{TLSPolicy: "External",
+		ParentRefs:             []config.Parent{{Name: "secure", Namespace: "apps", SectionName: "https"}},
+		HTTPRedirectParentRefs: []config.Parent{{Name: "redirect", Namespace: "apps", SectionName: "http"}},
+	}
 	if err := r.SetupWithManager(ctx, manager); err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +155,64 @@ func TestAPIServerReconciliation(t *testing.T) {
 		}
 		return *route.Spec.Rules[0].BackendRefs[0].Port == 8080
 	})
+	// Exercise redirect/header admission and cleanup against the real CRD schema.
+	writer := &IngressReconciler{Client: apiClient, Config: r.Config}
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "redirect-apps"}, Spec: networkingv1.IngressClassSpec{Controller: r.Config.ControllerName}}
+	if err := apiClient.Create(ctx, class); err != nil {
+		t.Fatal(err)
+	}
+	secureGateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "secure", Namespace: "apps"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "example", Listeners: []gatewayv1.Listener{{Name: "https", Protocol: gatewayv1.HTTPSProtocolType, Port: 443, TLS: &gatewayv1.ListenerTLSConfig{CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "existing"}}}}}}}
+	redirectGateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "redirect", Namespace: "apps"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "example", Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}}}
+	for _, gw := range []*gatewayv1.Gateway{secureGateway, redirectGateway} {
+		if err := apiClient.Create(ctx, gw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	redirectSource := source()
+	redirectSource.Name = "redirect-example"
+	redirectSource.UID = ""
+	redirectSource.Spec.IngressClassName = ptr.To("redirect-apps")
+	redirectSource.Spec.TLS = []networkingv1.IngressTLS{{SecretName: "existing"}}
+	redirectSource.Annotations = map[string]string{translate.HTTPSRedirectAnnotation: "true", translate.RequestHeadersAnnotation: `{"set":[{"name":"X-Forwarded-Proto","value":"https"}]}`, translate.ResponseHeadersAnnotation: `{"remove":["Server"]}`}
+	if err := apiClient.Create(ctx, redirectSource); err != nil {
+		t.Fatal(err)
+	}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(redirectSource)}
+	var admitted gatewayv1.HTTPRoute
+	redirectKey := client.ObjectKey{Namespace: "apps", Name: translate.RedirectRouteName(redirectSource.Name, "website.example.com")}
+	waitFor(t, func() bool { return apiClient.Get(ctx, redirectKey, &admitted) == nil })
+	if len(admitted.Spec.Rules[0].BackendRefs) != 0 || *admitted.Spec.Rules[0].Filters[0].RequestRedirect.StatusCode != 302 {
+		t.Fatal("redirect admission changed behavior")
+	}
+	rv = admitted.ResourceVersion
+	if _, err := writer.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, redirectKey, &admitted); err != nil {
+		t.Fatal(err)
+	}
+	if admitted.ResourceVersion != rv {
+		t.Fatal("redirect admission defaults caused repeated writes")
+	}
+	if err := apiClient.Get(ctx, request.NamespacedName, redirectSource); err != nil {
+		t.Fatal(err)
+	}
+	redirectSource.Annotations[translate.ResponseHeadersAnnotation] = `{"unknown":true}`
+	if err := apiClient.Update(ctx, redirectSource); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	var after gatewayv1.HTTPRouteList
+	if err := apiClient.List(ctx, &after, client.InNamespace("apps")); err != nil {
+		t.Fatal(err)
+	}
+	for _, remaining := range after.Items {
+		if metav1.IsControlledBy(&remaining, redirectSource) {
+			t.Fatal("invalid annotations retained a route")
+		}
+	}
 	if err := apiClient.Get(ctx, sourceKey, ingress); err != nil {
 		t.Fatal(err)
 	}

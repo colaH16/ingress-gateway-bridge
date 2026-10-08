@@ -54,8 +54,12 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 	if ingress.UID == "" {
 		return nil, reject("source Ingress must have a UID")
 	}
-	if err := checkAnnotations(ingress.Annotations); err != nil {
+	options, err := parseAnnotations(ingress.Annotations)
+	if err != nil {
 		return nil, err
+	}
+	if options.redirect && (len(binding.HTTPRedirectParentRefs) == 0 || len(ingress.Spec.TLS) == 0 || binding.TLSPolicy != "External") {
+		return nil, reject("HTTPS redirect requires httpRedirectParentRefs, Ingress TLS, and tlsPolicy: External")
 	}
 	if len(ingress.Spec.TLS) != 0 && binding.TLSPolicy != "External" {
 		return nil, reject("Ingress TLS requires tlsPolicy: External and preconfigured TLS; secrets are not copied")
@@ -101,6 +105,7 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 			rulesByHost[rule.Host] = append(rulesByHost[rule.Host], gatewayv1.HTTPRouteRule{
 				Matches:     []gatewayv1.HTTPRouteMatch{{Path: &match}},
 				BackendRefs: []gatewayv1.HTTPBackendRef{backend},
+				Filters:     options.filters,
 			})
 		}
 	}
@@ -139,6 +144,17 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 			route.Spec.Hostnames = []gatewayv1.Hostname{gatewayv1.Hostname(host)}
 		}
 		routes = append(routes, route)
+		if options.redirect {
+			redirect := *route.DeepCopy()
+			redirect.Name = RedirectRouteName(ingress.Name, host)
+			redirect.Spec.ParentRefs = binding.RedirectReferences()
+			redirect.Spec.Rules = []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: ptr.To(gatewayv1.PathMatchPathPrefix), Value: ptr.To("/")}}},
+				Filters: []gatewayv1.HTTPRouteFilter{{Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+					RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{Scheme: ptr.To("https"), Port: ptr.To(gatewayv1.PortNumber(443)), StatusCode: ptr.To(options.status)}}},
+			}}
+			routes = append(routes, redirect)
+		}
 	}
 	return routes, nil
 }
@@ -152,6 +168,10 @@ func RouteName(ingressName, host string) string {
 	}
 	stem = strings.TrimRight(stem, "-.")
 	return fmt.Sprintf("%s-bridge-%x", stem, sum[:8])
+}
+
+func RedirectRouteName(ingressName, host string) string {
+	return RouteName(ingressName, host+"\x00https-redirect")
 }
 
 func pathMatch(path networkingv1.HTTPIngressPath) (gatewayv1.HTTPPathMatch, error) {
@@ -234,24 +254,6 @@ func backendRef(namespace string, backend networkingv1.IngressBackend,
 		},
 		Weight: ptr.To(int32(1)),
 	}}, nil
-}
-
-// Only the bridge's annotation namespace belongs to its input contract. Other
-// controllers' annotations stay on the Ingress and are not interpreted or copied.
-// No bridge-specific Ingress input annotations are defined in this version.
-func checkAnnotations(annotations map[string]string) error {
-	var unknown []string
-	for name := range annotations {
-		if strings.HasPrefix(name, AnnotationPrefix) {
-			unknown = append(unknown, name)
-		}
-	}
-	sort.Strings(unknown)
-	if len(unknown) != 0 {
-		// Never include annotation values: they may contain credentials or URLs.
-		return reject("unknown bridge Ingress annotations: %s", strings.Join(unknown, ", "))
-	}
-	return nil
 }
 
 func ServiceNames(ingress *networkingv1.Ingress) []string {

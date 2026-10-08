@@ -88,7 +88,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// route and retry; a Service watch also triggers reconciliation.
 		return ctrl.Result{}, err
 	}
-	if err := r.checkParents(ctx, ingress.Namespace, binding); err != nil {
+	if err := r.checkParents(ctx, ingress.Namespace, binding, ingress.Annotations[translate.HTTPSRedirectAnnotation] == "true"); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Validate all name collisions before writing any route for this Ingress.
@@ -201,8 +201,12 @@ func (r *IngressReconciler) rejectSource(ctx context.Context, ingress *networkin
 
 // The destination controller remains responsible for listener hostname matching,
 // certificate validation, and HTTPRoute Accepted/ResolvedRefs/Programmed status.
-func (r *IngressReconciler) checkParents(ctx context.Context, namespace string, binding config.Binding) error {
-	for _, parent := range binding.ParentRefs {
+func (r *IngressReconciler) checkParents(ctx context.Context, namespace string, binding config.Binding, redirect bool) error {
+	parents := append([]config.Parent(nil), binding.ParentRefs...)
+	if redirect {
+		parents = append(parents, binding.HTTPRedirectParentRefs...)
+	}
+	for n, parent := range parents {
 		var gateway gatewayv1.Gateway
 		key := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
 		if err := r.Get(ctx, key, &gateway); err != nil {
@@ -214,6 +218,10 @@ func (r *IngressReconciler) checkParents(ctx context.Context, namespace string, 
 				continue
 			}
 			if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
+				continue
+			}
+			if redirect && ((n < len(binding.ParentRefs) && (listener.Protocol != gatewayv1.HTTPSProtocolType || listener.Port != 443)) ||
+				(n >= len(binding.ParentRefs) && (listener.Protocol != gatewayv1.HTTPProtocolType || listener.Port != 80))) {
 				continue
 			}
 			allowed := listener.AllowedRoutes
@@ -313,7 +321,7 @@ func (r *IngressReconciler) forClass(ctx context.Context, object client.Object) 
 func (r *IngressReconciler) forGateway(ctx context.Context, object client.Object) []reconcile.Request {
 	var requests []reconcile.Request
 	for name, binding := range r.Config.Classes {
-		for _, parent := range binding.ParentRefs {
+		for _, parent := range binding.AllParents() {
 			if parent.Name == object.GetName() && parent.Namespace == object.GetNamespace() {
 				requests = append(requests, r.requests(ctx, client.MatchingFields{classIndex: name})...)
 				break

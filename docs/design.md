@@ -12,8 +12,9 @@ owned by its IngressClass controller name. It does not convert every class. Fore
 NGINX/Traefik/HAProxy annotations, including malformed values, remain on the source
 and are neither interpreted nor copied to the generated Route. Only annotations
 in `ingress-gateway-bridge.colah16.github.io/` belong to the bridge's validation
-contract. No bridge-specific Ingress input keys are defined yet; unknown keys are
-rejected. Future known keys must reject invalid syntax and values.
+contract. The documented redirect and header input keys validate their syntax and values;
+unknown keys are rejected. Redirect routes use separate configured HTTP listeners
+and share the source Ingress ownerReference. Forwarding route identities remain stable.
 
 One installation handles multiple classes through a single configuration file.
 If several writer replicas are used, enable leader election and grant Lease

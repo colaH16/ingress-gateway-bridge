@@ -53,6 +53,13 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	className, err := translate.ClassName(&ingress)
 	if err != nil {
+		// Report the ambiguity only if one of the names selects a bridge class;
+		// other controllers' Ingresses must not receive bridge Events.
+		_, fieldMapped := r.Config.Classes[*ingress.Spec.IngressClassName]
+		_, legacyMapped := r.Config.Classes[ingress.Annotations[translate.LegacyClass]]
+		if !fieldMapped && !legacyMapped {
+			return ctrl.Result{}, r.removeRoutes(ctx, existing)
+		}
 		return ctrl.Result{}, r.rejectSource(ctx, &ingress, existing, err)
 	}
 	binding, enabled := r.Config.Classes[className]
@@ -61,6 +68,11 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	var class networkingv1.IngressClass
 	if err := r.Get(ctx, types.NamespacedName{Name: className}, &class); err != nil {
+		if apierrors.IsNotFound(err) {
+			// A deleted class is no longer owned by this controller. Its watch
+			// re-enqueues the source if the class is created again.
+			return ctrl.Result{}, r.removeRoutes(ctx, existing)
+		}
 		return ctrl.Result{}, fmt.Errorf("read IngressClass %s: %w", className, err)
 	}
 	if class.Spec.Controller != r.Config.ControllerName {

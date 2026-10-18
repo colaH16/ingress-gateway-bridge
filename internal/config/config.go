@@ -73,7 +73,7 @@ func (c Config) Validate() error {
 		for _, p := range binding.AllParents() {
 			if len(validation.IsDNS1123Subdomain(p.Name)) != 0 || len(p.Name) > 253 ||
 				len(validation.IsDNS1123Label(p.Namespace)) != 0 ||
-				(p.SectionName != "" && (len(validation.IsDNS1123Label(p.SectionName)) != 0)) {
+				(p.SectionName != "" && len(validation.IsDNS1123Subdomain(p.SectionName)) != 0) {
 				return fmt.Errorf("class %s: invalid Gateway parent reference", name)
 			}
 			if seen[p] {
@@ -84,6 +84,25 @@ func (c Config) Validate() error {
 		for _, p := range binding.HTTPRedirectParentRefs {
 			if p.SectionName == "" {
 				return fmt.Errorf("class %s: httpRedirectParentRefs require an explicit sectionName", name)
+			}
+		}
+		// HTTPRoute CEL requires references to one Gateway to either all set or all
+		// omit sectionName. Forwarding and redirect refs are separate routes.
+		for _, parents := range [][]Parent{binding.ParentRefs, binding.HTTPRedirectParentRefs} {
+			scoped := map[Parent]bool{}
+			for _, p := range parents {
+				gateway := Parent{Name: p.Name, Namespace: p.Namespace}
+				if previous, seen := scoped[gateway]; seen && previous != (p.SectionName != "") {
+					return fmt.Errorf("class %s: references to one Gateway must all set or all omit sectionName", name)
+				}
+				scoped[gateway] = p.SectionName != ""
+			}
+		}
+		// Without a sectionName the forwarding route would also attach to the HTTP
+		// listener and compete with the redirect route for the same host and "/".
+		for _, p := range binding.ParentRefs {
+			if len(binding.HTTPRedirectParentRefs) != 0 && p.SectionName == "" {
+				return fmt.Errorf("class %s: parentRefs require an explicit sectionName when httpRedirectParentRefs are set", name)
 			}
 		}
 	}

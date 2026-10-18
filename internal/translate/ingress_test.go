@@ -129,6 +129,45 @@ func TestUnsupportedInputRejected(t *testing.T) {
 		{"dot segment", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/foo/../bar" }},
 		{"query", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/foo?bar" }},
 		{"encoded slash", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/foo%2Fbar" }},
+		// Valid Ingress paths that the HTTPRoute CRD's character pattern rejects.
+		{"space", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/foo bar" }},
+		{"non-ASCII", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/한글" }},
+		{"invalid percent encoding", func(i *networkingv1.Ingress) { i.Spec.Rules[0].HTTP.Paths[0].Path = "/a%zz" }},
+		{"unsupported after missing named port", func(i *networkingv1.Ingress) {
+			p := i.Spec.Rules[0].HTTP.Paths[0]
+			i.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+			p.Path = "/later"
+			p.PathType = ptr.To(networkingv1.PathTypeImplementationSpecific)
+			i.Spec.Rules[0].HTTP.Paths = append(i.Spec.Rules[0].HTTP.Paths, p)
+		}},
+		{"wildcard after missing named port", func(i *networkingv1.Ingress) {
+			i.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+			second := *i.Spec.Rules[0].DeepCopy()
+			second.Host = "*.example.com"
+			i.Spec.Rules = append(i.Spec.Rules, second)
+		}},
+		{"too many rules with a missing named port", func(i *networkingv1.Ingress) {
+			i.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+			for n := 0; n < 16; n++ {
+				p := *i.Spec.Rules[0].HTTP.Paths[0].DeepCopy()
+				p.Path = "/" + strings.Repeat("a", n+1)
+				p.Backend.Service.Port = networkingv1.ServiceBackendPort{Number: 80}
+				i.Spec.Rules[0].HTTP.Paths = append(i.Spec.Rules[0].HTTP.Paths, p)
+			}
+		}},
+		{"different Service than a missing named port", func(i *networkingv1.Ingress) {
+			p := *i.Spec.Rules[0].HTTP.Paths[0].DeepCopy()
+			i.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+			p.Backend.Service.Name = "other"
+			i.Spec.Rules[0].HTTP.Paths = append(i.Spec.Rules[0].HTTP.Paths, p)
+		}},
+		{"conflicting ports after a missing named port", func(i *networkingv1.Ingress) {
+			p := *i.Spec.Rules[0].HTTP.Paths[0].DeepCopy()
+			i.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+			q := *p.DeepCopy()
+			q.Backend.Service.Port.Number = 81
+			i.Spec.Rules[0].HTTP.Paths = append(i.Spec.Rules[0].HTTP.Paths, p, q)
+		}},
 		{"too many rules", func(i *networkingv1.Ingress) {
 			for n := 0; n < 17; n++ {
 				p := i.Spec.Rules[0].HTTP.Paths[0]
@@ -149,6 +188,27 @@ func TestUnsupportedInputRejected(t *testing.T) {
 				t.Fatal("annotation value leaked")
 			}
 		})
+	}
+}
+
+// Whether a named port equals a numeric port on the same Service is unknown
+// until that Service exists, so this remains a retried dependency failure.
+func TestSameServiceUnresolvedDuplicateIsDependency(t *testing.T) {
+	ingress := fixture()
+	p := *ingress.Spec.Rules[0].HTTP.Paths[0].DeepCopy()
+	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Name: "http"}
+	ingress.Spec.Rules[0].HTTP.Paths = append(ingress.Spec.Rules[0].HTTP.Paths, p)
+	_, err := convert(ingress)
+	var rejected *Rejected
+	if err == nil || errors.As(err, &rejected) {
+		t.Fatalf("expected a dependency error, got %v", err)
+	}
+	services := map[types.NamespacedName]*corev1.Service{{Namespace: "apps", Name: "website"}: {
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 80}}},
+	}}
+	routes, err := Convert(ingress, binding(), services, config.Config{ControllerName: config.ControllerName})
+	if err != nil || len(routes[0].Spec.Rules) != 1 {
+		t.Fatalf("equivalent named and numeric ports were not collapsed: %v", err)
 	}
 }
 

@@ -43,7 +43,8 @@ Each selected IngressClass must have
 `spec.controller: ingress-gateway-bridge.colah16.github.io/controller`.
 Do not share that class with another active Ingress controller.
 The binding selects a **Gateway object**, not a GatewayClass or a tunnel by hostname.
-Unmapped classes and classes owned by another controller are not converted.
+Unmapped classes, deleted IngressClasses, and classes owned by another controller
+are not converted; their bridge-owned Routes are withdrawn.
 
 `tlsPolicy: External` means the operator has already configured TLS on the Gateway
 or tunnel edge. The bridge does not copy Secrets, issue certificates,
@@ -73,7 +74,9 @@ HTTPS redirects require `spec.tls`, `tlsPolicy: External`, and separately config
 HTTP listener references. They create an additional owned HTTPRoute per host,
 matching `/`, preserving host, path, and query while redirecting to HTTPS port 443.
 The bridge validates HTTP port 80 redirect listeners and HTTPS port 443 forwarding
-listeners before writes. No redirect is added unless the Ingress opts in:
+listeners before writes. A class with `httpRedirectParentRefs` must also set
+`sectionName` on every forwarding `parentRefs` entry, so forwarding never attaches
+to the HTTP listener. No redirect is added unless the Ingress opts in:
 
 ```yaml
 # Class binding (operator configuration)
@@ -132,7 +135,9 @@ The controller reads Ingresses, IngressClasses, Services, Namespaces, Gateways, 
 HTTPRoutes, and logs planned route creates/updates/deletes. Dry-run does not write
 Routes, Events, status, finalizers, or leader-election Leases. Leader election is
 therefore rejected in dry-run mode. Configuration is read at startup; restart the
-controller after changing bindings.
+controller after changing bindings. Plan logs contain the complete planned Route
+spec, including `request-headers`/`response-headers` values; do not put secrets in
+those annotations, or restrict access to the controller logs accordingly.
 
 The [example controller manifests](examples/controller/) run in dry-run mode with
 read-only RBAC. The optional [writer RBAC](examples/writer-rbac.yaml) and
@@ -160,7 +165,9 @@ Prerequisites:
   when enabling writes; a successful build is not a data-plane validation.
 
 First edit `examples/controller/bridge.yaml`: each class maps to an existing
-Gateway's name, namespace, and optional listener `sectionName`. Keep the class
+Gateway's name, namespace, and optional listener `sectionName`. References to the
+same Gateway within a class must either all set `sectionName` or all omit it,
+as required by the HTTPRoute schema. Keep the class
 names in `examples/controller/ingressclasses.yaml` consistent. If an Ingress has
 `spec.tls`, select `tlsPolicy: External` only after the Gateway or tunnel edge's
 TLS is configured. Ingress TLS does not configure a Gateway certificate.
@@ -235,8 +242,17 @@ An invalid bridge annotation or unsupported standard Ingress field withdraws
 **only bridge-owned Routes** and
 produces a warning (an Event in write mode). This is not a guarantee of access
 denial: other catch-all Routes may still match. Audit the target Gateway before
-changing authentication or other security features. Missing dependencies retain
-the last applied route and are retried. Missing numeric-port backends are represented
+changing authentication or other security features. Paths containing characters
+the HTTPRoute schema does not accept (for example spaces or non-ASCII) are rejected
+the same way.
+
+Deleting a mapped IngressClass, or changing its `spec.controller`, withdraws
+bridge-owned Routes; recreating the class restores them through the class watch.
+Missing dependencies retain the last applied route and are retried: a missing
+named-port Service or port, a missing or non-permitting Gateway, and transient API
+read failures (including timeouts and `Forbidden`). An IngressClass read failure
+other than NotFound is also retried rather than treated as a deletion. Unsupported
+fields are reported even when another path's dependency is still missing. Missing numeric-port backends are represented
 as backendRefs; the Gateway controller reports `ResolvedRefs=False` when invalid.
 
 The bridge owns only the Ingress annotation namespace

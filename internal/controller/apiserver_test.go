@@ -155,6 +155,43 @@ func TestAPIServerReconciliation(t *testing.T) {
 		}
 		return *route.Spec.Rules[0].BackendRefs[0].Port == 8080
 	})
+	countRoutes := func() int {
+		var routes gatewayv1.HTTPRouteList
+		if err := apiClient.List(ctx, &routes, client.InNamespace("apps")); err != nil {
+			t.Fatal(err)
+		}
+		return len(routes.Items)
+	}
+	// Deleting the IngressClass ends bridge ownership; recreating it restores the
+	// route through the IngressClass watch alone.
+	publicClass := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "public-apps"}}
+	if err := apiClient.Delete(ctx, publicClass); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return countRoutes() == 0 })
+	publicClass = &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "public-apps"}, Spec: networkingv1.IngressClassSpec{Controller: r.Config.ControllerName}}
+	if err := apiClient.Create(ctx, publicClass); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return countRoutes() == 1 })
+	// The Ingress API accepts this path, but the HTTPRoute CRD does not; the source
+	// must be rejected instead of retrying a write the API server always refuses.
+	if err := apiClient.Get(ctx, sourceKey, ingress); err != nil {
+		t.Fatal(err)
+	}
+	ingress.Spec.Rules[0].HTTP.Paths[0].Path = "/admin page"
+	if err := apiClient.Update(ctx, ingress); err != nil {
+		t.Fatalf("Ingress API rejected the path: %v", err)
+	}
+	waitFor(t, func() bool { return countRoutes() == 0 })
+	if err := apiClient.Get(ctx, sourceKey, ingress); err != nil {
+		t.Fatal(err)
+	}
+	ingress.Spec.Rules[0].HTTP.Paths[0].Path = "/admin/"
+	if err := apiClient.Update(ctx, ingress); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return countRoutes() == 1 })
 	// Exercise redirect/header admission and cleanup against the real CRD schema.
 	writer := &IngressReconciler{Client: apiClient, Config: r.Config}
 	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "redirect-apps"}, Spec: networkingv1.IngressClassSpec{Controller: r.Config.ControllerName}}

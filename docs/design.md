@@ -47,7 +47,8 @@ Prefix trailing slashes are normalized. `/admin/` becomes `PathPrefix: /admin`, 
 matches `/admin` and `/admin/settings`, but not `/admin-tools` or `/foo/admin` in a
 conforming implementation. Dots remain literal: `/v1.0` is not a regular expression.
 Exact trailing slashes remain significant. The bridge adds no regex anchors or
-provider-specific path syntax to HTTPRoute.
+provider-specific path syntax to HTTPRoute. Ingress accepts some path characters
+that the HTTPRoute schema forbids; such paths are rejected before any write.
 
 Wildcard hosts are initially rejected because Ingress wildcards match one DNS
 label while Gateway API wildcard hostname behavior can cover multiple labels.
@@ -69,6 +70,10 @@ are **not atomic**; a later API error can leave an intermediate state until retr
 Invalid bridge annotations and unsupported standard source fields withdraw
 bridge-owned routes and report a rejection.
 Transient read or named-port resolution failures leave the last route in place.
+A missing IngressClass is not transient: with a synced cache it means the class is
+no longer owned by the bridge, so its routes are withdrawn like an ownership change.
+Source validation completes before a dependency failure is returned, so a missing
+Service cannot hide an unsupported field, a conflicting backend, or the rule limit.
 Gateways/listener permissions are checked before writes, but the destination
 controller decides hostname intersections, certificates, and final Route acceptance.
 The bridge does not set Ingress loadBalancer status. Inspect HTTPRoute parent status

@@ -17,6 +17,8 @@ CRDs from the pinned Go module, and runs the manager with real informers. It che
 - API defaulting does not cause a repeated update loop.
 - An Ingress update reaches the route without an explicit Reconcile invocation.
 - A named Service port update reaches the route through the Service watch.
+- Deleting the IngressClass withdraws the route; recreating it restores the route.
+- A path the Ingress API accepts but the HTTPRoute schema refuses withdraws the route.
 - Changing the source to an unmapped class removes its owned route.
 
 The integration test explicitly disables use of an existing cluster. The local API

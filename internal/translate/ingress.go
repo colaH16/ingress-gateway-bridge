@@ -4,7 +4,9 @@ package translate
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -24,6 +26,10 @@ const (
 	SourceAnnotation     = AnnotationPrefix + "source"
 	LegacyClass          = "kubernetes.io/ingress.class"
 )
+
+// literalPath is the HTTPRoute CRD pattern for Exact/PathPrefix values. Ingress
+// accepts characters outside it, which the API server would refuse on every retry.
+var literalPath = regexp.MustCompile(`^(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|[%][0-9a-fA-F]{2})+$`)
 
 // Rejected means the source cannot be represented by the supported subset.
 // The reconciler withdraws only its own routes; it never ignores such features.
@@ -71,6 +77,9 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 		return nil, reject("at least one HTTP rule is required")
 	}
 	rulesByHost := map[string][]gatewayv1.HTTPRouteRule{}
+	// A missing named-port dependency is reported only after the whole source has
+	// been validated, so it cannot hide an unsupported field that requires withdrawal.
+	var dependencyErr error
 	seenByHost := map[string]map[string]gatewayv1.HTTPBackendRef{}
 	for _, rule := range ingress.Spec.Rules {
 		if strings.Contains(rule.Host, "*") {
@@ -91,17 +100,33 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 				return nil, err
 			}
 			backend, err := backendRef(ingress.Namespace, path.Backend, services)
-			if err != nil {
+			var rejected *Rejected
+			if errors.As(err, &rejected) {
 				return nil, err
+			}
+			if err != nil {
+				if dependencyErr == nil {
+					dependencyErr = err
+				}
+				// Keep the unresolved match for the rule limit and backend conflicts.
+				backend = gatewayv1.HTTPBackendRef{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+					Name: gatewayv1.ObjectName(path.Backend.Service.Name)}}}
 			}
 			key := string(*match.Type) + ":" + *match.Value
 			if previous, exists := seenByHost[rule.Host][key]; exists {
-				if previous.Name != backend.Name || *previous.Port != *backend.Port {
+				// An unresolved port can only be compared once its Service is available.
+				if previous.Name != backend.Name || (previous.Port != nil && backend.Port != nil && *previous.Port != *backend.Port) {
 					return nil, reject("duplicate host/path points to different backends")
+				}
+				if previous.Port == nil {
+					seenByHost[rule.Host][key] = backend
 				}
 				continue
 			}
 			seenByHost[rule.Host][key] = backend
+			if backend.Port == nil {
+				continue
+			}
 			rulesByHost[rule.Host] = append(rulesByHost[rule.Host], gatewayv1.HTTPRouteRule{
 				Matches:     []gatewayv1.HTTPRouteMatch{{Path: &match}},
 				BackendRefs: []gatewayv1.HTTPBackendRef{backend},
@@ -109,11 +134,16 @@ func Convert(ingress *networkingv1.Ingress, binding config.Binding,
 			})
 		}
 	}
-	hosts := make([]string, 0, len(rulesByHost))
-	for host, rules := range rulesByHost {
-		if len(rules) > 16 {
+	for _, matches := range seenByHost {
+		if len(matches) > 16 {
 			return nil, reject("a host exceeds the Gateway API limit of 16 rules per HTTPRoute")
 		}
+	}
+	if dependencyErr != nil {
+		return nil, dependencyErr
+	}
+	hosts := make([]string, 0, len(rulesByHost))
+	for host := range rulesByHost {
 		hosts = append(hosts, host)
 	}
 	sort.Strings(hosts)
@@ -190,7 +220,7 @@ func pathMatch(path networkingv1.HTTPIngressPath) (gatewayv1.HTTPPathMatch, erro
 	if !strings.HasPrefix(path.Path, "/") || strings.Contains(path.Path, "//") ||
 		strings.Contains(path.Path, "%2f") || strings.Contains(path.Path, "%2F") ||
 		strings.ContainsAny(path.Path, "?#") || strings.Contains(path.Path, "/../") ||
-		strings.Contains(path.Path, "/./") || strings.HasSuffix(path.Path, "/..") || strings.HasSuffix(path.Path, "/.") || len(path.Path) > 1024 {
+		strings.Contains(path.Path, "/./") || strings.HasSuffix(path.Path, "/..") || strings.HasSuffix(path.Path, "/.") || len(path.Path) > 1024 || !literalPath.MatchString(path.Path) {
 		return gatewayv1.HTTPPathMatch{}, reject("path cannot be represented as a Gateway API literal path")
 	}
 	value := path.Path

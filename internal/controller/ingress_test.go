@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/colaH16/ingress-gateway-bridge/internal/translate"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -191,6 +193,71 @@ func TestIngressClassOwnershipChangeWithdrawsRoutes(t *testing.T) {
 	reconcileSource(t, r)
 	if len(listRoutes(t, c)) != 0 {
 		t.Fatal("continued handling another controller's class")
+	}
+}
+
+func TestDeletedIngressClassWithdrawsRoutes(t *testing.T) {
+	r, c := setup(t)
+	reconcileSource(t, r)
+	if err := c.Client.Delete(context.Background(), &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "public-apps"}}); err != nil {
+		t.Fatal(err)
+	}
+	reconcileSource(t, r)
+	if len(listRoutes(t, c)) != 0 {
+		t.Fatal("deleted IngressClass kept serving bridge routes")
+	}
+}
+
+// Unlike NotFound, a failed class read says nothing about ownership.
+func TestIngressClassReadErrorPreservesRoutes(t *testing.T) {
+	r, c := setup(t)
+	reconcileSource(t, r)
+	for _, failure := range []error{
+		apierrors.NewTimeoutError("injected", 1),
+		apierrors.NewForbidden(networkingv1.Resource("ingressclasses"), "public-apps", errors.New("injected")),
+	} {
+		r.Client = failingClassReads{Client: c, err: failure}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: sourceKey}); err == nil {
+			t.Fatal("class read failure was not retried")
+		}
+		if len(listRoutes(t, c)) != 1 || c.deletes != 0 {
+			t.Fatal("transient class read failure withdrew a route")
+		}
+	}
+}
+
+type failingClassReads struct {
+	client.Client
+	err error
+}
+
+func (c failingClassReads) Get(ctx context.Context, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+	if _, ok := o.(*networkingv1.IngressClass); ok {
+		return c.err
+	}
+	return c.Client.Get(ctx, key, o, opts...)
+}
+
+func TestConflictingForeignClassesAreIgnored(t *testing.T) {
+	r, c := setup(t)
+	r.Recorder = record.NewFakeRecorder(10)
+	changeSource(t, c.Client, func(i *networkingv1.Ingress) {
+		i.Spec.IngressClassName = ptr.To("traefik")
+		i.Annotations = map[string]string{translate.LegacyClass: "nginx"}
+	})
+	reconcileSource(t, r)
+	select {
+	case <-r.Recorder.(*record.FakeRecorder).Events:
+		t.Fatal("reported a class conflict on an Ingress the bridge does not select")
+	default:
+	}
+	// A conflict involving a bridge class is still an explicit rejection.
+	changeSource(t, c.Client, func(i *networkingv1.Ingress) { i.Annotations[translate.LegacyClass] = "public-apps" })
+	reconcileSource(t, r)
+	select {
+	case <-r.Recorder.(*record.FakeRecorder).Events:
+	default:
+		t.Fatal("bridge class conflict not reported")
 	}
 }
 
